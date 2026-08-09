@@ -99,4 +99,5 @@ AisleIQ---HackVerse-2.0/
 - Adit: GenAI Alert Synthesis, LangChain Pipeline & Slack Integration.
 
 📜 License
+
 Distributed under the MIT License. See LICENSE for more information.
