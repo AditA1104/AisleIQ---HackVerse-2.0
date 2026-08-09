@@ -8,7 +8,6 @@ import streamlit as st
 try:
     from backend import trigger_dwell_time_alert, summarize_daily_trends
 except ImportError:
-    # Fallback mocks if backend.py is not present in environment
     def trigger_dwell_time_alert(aisle_name="Electronics", dwell_seconds=48):
         return f"🚨 Alert: Customer stalled in {aisle_name} for {dwell_seconds} seconds! Floor assistance recommended."
 
@@ -20,7 +19,7 @@ except ImportError:
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="aisleIQ",
+    page_title="aisleIQ.",
     page_icon="🛒",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -38,6 +37,9 @@ if "toolbar_open" not in st.session_state:
 
 if "dark_mode" not in st.session_state:
     st.session_state.dark_mode = False
+
+if "show_ai_summary" not in st.session_state:
+    st.session_state.show_ai_summary = False
 
 # --- 3. DYNAMIC SIDEBAR VISIBILITY & ANIMATION CONTROL ---
 st.markdown(
@@ -105,11 +107,7 @@ else:
     btn_bg = "#030B33"
     splash_bg = "radial-gradient(circle at center, #F9F7F1 0%, #F3F0E8 100%)"
 
-app_animation = (
-    "none !important"
-    if is_subpage
-    else "appEntrance 0.55s cubic-bezier(0.16, 1, 0.3, 1) ease-out forwards"
-)
+app_animation = "none !important"
 bg_transition = "none !important" if is_subpage else "background-color 0.4s ease"
 
 # --- 5. CUSTOM STYLING & ANIMATIONS ---
@@ -121,17 +119,6 @@ st.markdown(
     @keyframes slideInToolbar {{
         0% {{ transform: translateX(-100%); opacity: 0; }}
         100% {{ transform: translateX(0); opacity: 1; }}
-    }}
-
-    @keyframes appEntrance {{
-        0% {{ opacity: 0; transform: translateY(25px) scale(0.98); }}
-        100% {{ opacity: 1; transform: translateY(0) scale(1); }}
-    }}
-
-    @keyframes splashContainerEntrance {{
-        0% {{ opacity: 0; transform: scale(0.88) translateY(30px); }}
-        60% {{ opacity: 1; transform: scale(1.02) translateY(-5px); }}
-        100% {{ opacity: 1; transform: scale(1) translateY(0); }}
     }}
 
     @keyframes logoPulseGlow {{
@@ -174,16 +161,51 @@ st.markdown(
         font-weight: 600 !important;
     }}
 
-    div[data-testid="stColumn"] button[key="open_toolbar_btn"] {{
-        background: {accent_brand} !important;
+    /* COMPACT POP-UP TOAST NOTIFICATION WITH WHITE TEXT */
+    div[data-testid="stToast"] {{
+        background-color: #161B22 !important;
+        border: 2px solid {accent_brand} !important;
+        border-radius: 10px !important;
+        box-shadow: 3px 3px 0px {box_shadow_col} !important;
+        padding: 6px 14px !important;
+        max-width: 280px !important;
+        min-height: 42px !important;
+    }}
+
+    div[data-testid="stToast"] * {{
         color: #FFFFFF !important;
-        border: 3px solid {border_col} !important;
-        border-radius: 14px !important;
+        font-family: 'Poppins', sans-serif !important;
+        font-size: 0.88rem !important;
+        line-height: 1.25 !important;
+    }}
+
+    /* ALL TOOLBAR ARROWS & DROPDOWNS FORCED TO WHITE */
+    section[data-testid="stSidebar"] svg,
+    section[data-testid="stSidebar"] svg path,
+    section[data-testid="stSidebar"] svg circle,
+    section[data-testid="stSidebar"] svg polygon,
+    section[data-testid="stSidebar"] svg g,
+    section[data-testid="stSidebar"] [data-testid="stExpander"] summary svg,
+    section[data-testid="stSidebar"] [data-testid="stExpander"] summary svg path,
+    section[data-testid="stSidebar"] div[data-baseweb="select"] svg,
+    section[data-testid="stSidebar"] div[data-baseweb="select"] svg path {{
+        fill: #FFFFFF !important;
+        color: #FFFFFF !important;
+        stroke: #FFFFFF !important;
+    }}
+
+    /* LIGHT HAMBURGER MENU BUTTON WITH DARK LINES */
+    div[data-testid="stColumn"] button[key="open_toolbar_btn"] {{
+        background: #F3F0E8 !important;
+        color: #030B33 !important;
+        border: 3px solid #030B33 !important;
+        border-radius: 12px !important;
         padding: 0px !important;
-        font-size: 1.6rem !important;
+        font-size: 1.8rem !important;
+        font-weight: 800 !important;
         box-shadow: 4px 4px 0px {box_shadow_col} !important;
-        width: 54px !important;
-        height: 54px !important;
+        width: 52px !important;
+        height: 52px !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
@@ -192,11 +214,16 @@ st.markdown(
         transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
     }}
 
+    div[data-testid="stColumn"] button[key="open_toolbar_btn"] p {{
+        color: #030B33 !important;
+        font-weight: 800 !important;
+    }}
+
     div[data-testid="stColumn"] button[key="open_toolbar_btn"]:hover {{
-        background: {border_col} !important;
-        color: #FFFFFF !important;
+        background: #FFFFFF !important;
+        color: #000000 !important;
         box-shadow: 6px 6px 0px {box_shadow_col} !important;
-        transform: translate(-2px, -2px) rotate(45deg);
+        transform: translate(-2px, -2px);
     }}
 
     section[data-testid="stSidebar"] {{
@@ -205,10 +232,7 @@ st.markdown(
         padding-top: 20px;
     }}
 
-    section[data-testid="stSidebar"] *,
     section[data-testid="stSidebar"] label,
-    section[data-testid="stSidebar"] span,
-    section[data-testid="stSidebar"] div,
     section[data-testid="stSidebar"] p,
     section[data-testid="stSidebar"] h1,
     section[data-testid="stSidebar"] h2,
@@ -217,13 +241,27 @@ st.markdown(
         font-family: 'Poppins', sans-serif;
     }}
 
+    section[data-testid="stSidebar"] [data-testid="stExpander"] {{
+        background-color: rgba(255, 255, 255, 0.05) !important;
+        border: 2px solid {accent_brand} !important;
+        border-radius: 12px !important;
+        margin-bottom: 12px !important;
+    }}
+
+    section[data-testid="stSidebar"] summary p {{
+        font-weight: 600 !important;
+        font-size: 1.05rem !important;
+        color: #FFFFFF !important;
+    }}
+
     .sidebar-brand {{
-        font-size: 2rem;
+        font-size: 1.8rem;
         font-weight: 600 !important;
         color: #FFFFFF !important;
         padding-bottom: 10px;
         border-bottom: 2px solid {accent_brand};
         margin-bottom: 20px;
+        letter-spacing: 0.05em;
     }}
 
     .splash-container {{
@@ -238,7 +276,6 @@ st.markdown(
         border-radius: 32px;
         padding: 40px;
         box-shadow: 12px 12px 0px {box_shadow_col};
-        animation: splashContainerEntrance 0.75s cubic-bezier(0.16, 1, 0.3, 1) cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
         position: relative;
         overflow: hidden;
     }}
@@ -305,24 +342,25 @@ st.markdown(
         line-height: 1;
     }}
 
-    .app-subhead-clean {{
-        font-weight: 600;
-        margin-left: 16px;
-        font-size: 1.6rem;
-        color: {accent_brand} !important;
+    div.stButton > button[key="live_feed_redirect_btn"] {{
+        background: linear-gradient(135deg, #FF3B30 0%, #B71C1C 100%) !important;
+        color: #FFFFFF !important;
+        padding: 12px 28px !important;
+        border-radius: 40px !important;
+        font-family: 'Poppins', sans-serif !important;
+        font-size: 1.2rem !important;
+        font-weight: 600 !important;
+        text-transform: uppercase !important;
+        border: 2px solid #5A1818 !important;
+        box-shadow: 3px 3px 0px {box_shadow_col} !important;
+        margin-bottom: 0px !important;
     }}
 
-    .app-status-red {{
-        background: #030B33 !important;
+    div.stButton > button[key="live_feed_redirect_btn"]:hover {{
+        background: linear-gradient(135deg, #E53935 0%, #880E4F 100%) !important;
         color: #FFFFFF !important;
-        padding: 12px 28px;
-        border-radius: 40px;
-        font-family: 'Poppins', sans-serif;
-        font-size: 1.2rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        border: 2px solid #FF3B30;
-        box-shadow: 3px 3px 0px {box_shadow_col};
+        transform: translate(-2px, -2px) !important;
+        box-shadow: 5px 5px 0px {box_shadow_col} !important;
     }}
 
     .card-green-light {{
@@ -428,7 +466,7 @@ if not st.session_state.splash_done:
     st.markdown(
         """
         <div class="splash-container">
-            <div class="splash-logo">aisleIQ</div>
+            <div class="splash-logo">aisleIQ.</div>
             <div class="splash-subtitle">⚡ Retail Intelligence Engine</div>
         </div>
     """,
@@ -448,52 +486,66 @@ if not st.session_state.splash_done:
 # ==========================================
 with st.sidebar:
     st.markdown(
-        "<div class='sidebar-brand'>⚙️ TOOLBAR</div>", unsafe_allow_html=True
+        "<div class='sidebar-brand'>TOOLBAR</div>", unsafe_allow_html=True
     )
 
-    st.markdown("### 🎨 THEME & DISPLAY")
-    dark_mode_toggle = st.toggle(
-        "🌙 Dark Mode", value=st.session_state.dark_mode, key="dark_mode_switch"
-    )
-    if dark_mode_toggle != st.session_state.dark_mode:
-        st.session_state.dark_mode = dark_mode_toggle
-        st.rerun()
+    with st.expander("🎨 THEME & DISPLAY", expanded=False):
+        dark_mode_toggle = st.toggle(
+            "🌙 Dark Mode", value=st.session_state.dark_mode, key="dark_mode_switch"
+        )
+        if dark_mode_toggle != st.session_state.dark_mode:
+            st.session_state.dark_mode = dark_mode_toggle
+            st.rerun()
 
-    st.markdown("---")
-    st.markdown("### 🛠️ NAVIGATION")
-    nav_selection = st.radio(
-        "Module Switcher",
-        ["Overview", "Heatmap Analytics", "Staff Dispatch"],
-        index=["Overview", "Heatmap", "Dispatch"].index(
-            st.session_state.active_tab
-        ),
-    )
+    with st.expander("🛠️ MODULE SWITCHER", expanded=False):
+        nav_selection = st.radio(
+            "Select View",
+            ["Overview", "Heatmap Analytics", "Staff Dispatch", "Live Tracking"],
+            index=[
+                "Overview",
+                "Heatmap Analytics",
+                "Staff Dispatch",
+                "Live Tracking",
+            ].index(
+                {
+                    "Overview": "Overview",
+                    "Heatmap": "Heatmap Analytics",
+                    "Dispatch": "Staff Dispatch",
+                    "Live Tracking": "Live Tracking",
+                }.get(st.session_state.active_tab, "Overview")
+            ),
+        )
 
-    if nav_selection == "Overview" and st.session_state.active_tab != "Overview":
-        st.session_state.active_tab = "Overview"
-        st.rerun()
-    elif (
-        nav_selection == "Heatmap Analytics"
-        and st.session_state.active_tab != "Heatmap"
-    ):
-        st.session_state.active_tab = "Heatmap"
-        st.rerun()
-    elif (
-        nav_selection == "Staff Dispatch"
-        and st.session_state.active_tab != "Dispatch"
-    ):
-        st.session_state.active_tab = "Dispatch"
-        st.rerun()
+        if nav_selection == "Overview" and st.session_state.active_tab != "Overview":
+            st.session_state.active_tab = "Overview"
+            st.rerun()
+        elif (
+            nav_selection == "Heatmap Analytics"
+            and st.session_state.active_tab != "Heatmap"
+        ):
+            st.session_state.active_tab = "Heatmap"
+            st.rerun()
+        elif (
+            nav_selection == "Staff Dispatch"
+            and st.session_state.active_tab != "Dispatch"
+        ):
+            st.session_state.active_tab = "Dispatch"
+            st.rerun()
+        elif (
+            nav_selection == "Live Tracking"
+            and st.session_state.active_tab != "Live Tracking"
+        ):
+            st.session_state.active_tab = "Live Tracking"
+            st.rerun()
 
-    st.markdown("---")
-    st.markdown("### ⚙️ QUICK CONTROLS")
-    st.toggle("Auto-Refresh Feed", value=True)
-    st.selectbox(
-        "Floor Zone", ["Zone A (Snacks)", "Zone B (Produce)", "Zone C (Bakery)"]
-    )
-    st.slider(
-        "Alert Sensitivity", 10, 60, 45, help="Dwell duration trigger in seconds"
-    )
+    with st.expander("⚙️ QUICK CONTROLS", expanded=False):
+        st.toggle("Auto-Refresh Feed", value=True)
+        st.selectbox(
+            "Floor Zone", ["Zone A (Snacks)", "Zone B (Produce)", "Zone C (Bakery)"]
+        )
+        st.slider(
+            "Alert Sensitivity", 10, 60, 45, help="Dwell duration trigger in seconds"
+        )
 
     st.markdown("---")
     st.markdown(
@@ -503,11 +555,11 @@ with st.sidebar:
     )
 
 # ==========================================
-# TOP-LEFT ICON-ONLY ⚙️ TOGGLE BUTTON
+# HAMBURGER MENU BUTTON ☰
 # ==========================================
 col_btn, col_empty = st.columns([1, 15])
 with col_btn:
-    if st.button("⚙️", key="open_toolbar_btn", help="Toggle Toolbar"):
+    if st.button("☰", key="open_toolbar_btn", help="Toggle Menu"):
         st.session_state.toolbar_open = not st.session_state.toolbar_open
         st.rerun()
 
@@ -515,25 +567,40 @@ with col_btn:
 # DYNAMIC MAIN HEADER
 # ==========================================
 if st.session_state.active_tab == "Overview":
-    header_title = "aisleIQ"
-    subhead_html = ""
+    header_title = "aisleIQ."
 elif st.session_state.active_tab == "Heatmap":
     header_title = "Heatmap Analytics"
-    subhead_html = ""
-else:
+elif st.session_state.active_tab == "Dispatch":
     header_title = "Staff Dispatch"
-    subhead_html = ""
+else:
+    header_title = "Live Tracking"
 
-header_markup = f'<div class="app-header-clean"><div><span class="app-brand-clean">{header_title}</span>{subhead_html}</div><span class="app-status-red">● LIVE FEED</span></div>'
-st.markdown(header_markup, unsafe_allow_html=True)
+# SHOW LIVE FEED BUTTON ONLY ON OVERVIEW PAGE
+if st.session_state.active_tab == "Overview":
+    col_title, col_live_btn = st.columns([4, 1])
+    with col_title:
+        st.markdown(
+            f'<div class="app-header-clean"><span class="app-brand-clean">{header_title}</span></div>',
+            unsafe_allow_html=True,
+        )
+    with col_live_btn:
+        st.markdown(
+            '<div style="padding-top: 15px;"></div>', unsafe_allow_html=True
+        )
+        if st.button("● LIVE FEED", key="live_feed_redirect_btn"):
+            st.session_state.active_tab = "Live Tracking"
+            st.rerun()
+else:
+    st.markdown(
+        f'<div class="app-header-clean"><span class="app-brand-clean">{header_title}</span></div>',
+        unsafe_allow_html=True,
+    )
 
 # ==========================================
-# TAB 1: EXECUTIVE OVERVIEW & AI NOTIFICATIONS
+# TAB 1: EXECUTIVE OVERVIEW
 # ==========================================
 if st.session_state.active_tab == "Overview":
 
-    # --- LIVE CAMERA FEED THRESHOLD MONITORING ---
-    # Triggered when customer dwell threshold (>45s) is crossed in video loop
     customer_is_confused = True
 
     if customer_is_confused:
@@ -611,9 +678,13 @@ if st.session_state.active_tab == "Overview":
 
     st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
 
-    # --- EXECUTIVE INSIGHTS TAB / AI SUMMARY SECTION ---
     st.markdown("# 💡 EXECUTIVE INSIGHTS")
-    if st.button("Generate Daily AI Summary", key="ai_summary_trigger_btn"):
+
+    if not st.session_state.show_ai_summary:
+        if st.button("Generate Daily AI Summary", key="ai_summary_trigger_btn"):
+            st.session_state.show_ai_summary = True
+            st.rerun()
+    else:
         mock_heatmap_data = {
             "Electronics_Zone": "52 mins total dwell",
             "Checkout_Queue": "Peak 6 people at 2 PM",
@@ -621,19 +692,15 @@ if st.session_state.active_tab == "Overview":
         summary = summarize_daily_trends(mock_heatmap_data)
         st.info(summary)
 
-    if st.button(
-        "👉 GO TO DISPATCH & ASSIGN STAFF",
-        key="overview_to_dispatch",
-        use_container_width=True,
-    ):
-        st.session_state.active_tab = "Dispatch"
-        st.rerun()
+        if st.button("❌ Hide Daily AI Summary", key="hide_ai_summary_btn"):
+            st.session_state.show_ai_summary = False
+            st.rerun()
 
 # ==========================================
 # TAB 2: HEATMAP ANALYTICS
 # ==========================================
 elif st.session_state.active_tab == "Heatmap":
-    if st.button("⬅️", key="back_from_heatmap"):
+    if st.button("⬅️ BACK TO OVERVIEW", key="back_from_heatmap"):
         st.session_state.active_tab = "Overview"
         st.rerun()
 
@@ -688,7 +755,7 @@ elif st.session_state.active_tab == "Heatmap":
 # TAB 3: STAFF DISPATCH
 # ==========================================
 elif st.session_state.active_tab == "Dispatch":
-    if st.button("⬅️", key="back_from_dispatch"):
+    if st.button("⬅️ BACK TO OVERVIEW", key="back_from_dispatch"):
         st.session_state.active_tab = "Overview"
         st.rerun()
 
@@ -713,3 +780,24 @@ elif st.session_state.active_tab == "Dispatch":
 
     if st.button("✅ MARK INCIDENT AS RESOLVED", use_container_width=True):
         st.success("Incident marked resolved and logged in store operations ledger!")
+
+# ==========================================
+# TAB 4: LIVE TRACKING
+# ==========================================
+elif st.session_state.active_tab == "Live Tracking":
+    if st.button("⬅️ BACK TO OVERVIEW", key="back_from_livetracking"):
+        st.session_state.active_tab = "Overview"
+        st.rerun()
+
+    st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <div style="background: {btn_bg}; border: 3px dashed {border_col}; border-radius: 20px; height: 480px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #FFFFFF; text-align: center; padding: 20px; box-shadow: 6px 6px 0px {box_shadow_col};">
+            <div style="font-size: 4rem; margin-bottom: 12px;">📹</div>
+            <div style="font-size: 1.8rem; font-weight: 600;">Video Stream Placeholder</div>
+            <div style="font-size: 1.15rem; color: #A8D0E6; margin-top: 8px;">Insert your teammate's CCTV video tracking code here later.</div>
+        </div>
+    """,
+        unsafe_allow_html=True,
+    )
