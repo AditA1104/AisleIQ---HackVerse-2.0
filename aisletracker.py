@@ -29,6 +29,8 @@ import numpy as np
 FRAME_W, FRAME_H = 640, 480
 ZONE_PTS = np.array([[50, 50], [590, 50], [590, 430], [50, 430]], np.int32)
 DWELL_THRESHOLD_SECONDS = 5
+NOTIFY_COOLDOWN_SECONDS = 15  # once a shopper is alerted, don't re-notify for this many
+                              # more seconds of sustained alert (still logs, just quieter)
 
 
 # ----------------------------------------------------------------------
@@ -87,7 +89,19 @@ CLASS_COLORS = {
 # Both the real-video loop and the synthetic loop call this with a list
 # of detections in the form (track_id, x1, y1, x2, y2).
 # ----------------------------------------------------------------------
-def process_detections(frame, detections, zone_timers, intent_engine, active_alert_ids):
+def notify_employee(t_id, classification, friction_score, dwell_time):
+    """
+    This is the ONE place that should ever page a human. Wire your real
+    notification (Slack webhook, SMS, dashboard push, whatever) in here.
+    It's only called when should_notify() below says the cooldown has
+    cleared — never once per frame.
+    """
+    print(f"🔔 NOTIFY EMPLOYEE -> Customer #{t_id}: {classification} "
+          f"(dwell={dwell_time:.1f}s, friction={friction_score})")
+
+
+def process_detections(frame, detections, zone_timers, intent_engine, active_alert_ids,
+                        notification_state):
     """
     detections: list of tuples, either
         (t_id, x1, y1, x2, y2)                  -- dwell_time computed from wall clock
@@ -95,6 +109,8 @@ def process_detections(frame, detections, zone_timers, intent_engine, active_ale
                                                      (used by synthetic mode, where
                                                      frames are simulated seconds,
                                                      not real elapsed time)
+    notification_state: dict of t_id -> dwell_time at which they were last notified.
+                         Lives in the caller so it persists across frames.
     """
     cv2.polylines(frame, [ZONE_PTS], isClosed=True, color=(0, 255, 255), thickness=2)
     cv2.putText(frame, "Monitored Aisle Zone", (105, 90),
@@ -143,12 +159,25 @@ def process_detections(frame, detections, zone_timers, intent_engine, active_ale
 
             if display_seconds == DWELL_THRESHOLD_SECONDS:
                 print(f"[ALERT] Customer #{t_id} lingering in Zone for {display_seconds}s!")
+
             if is_alert:
-                print(f"[INTENT ALERT] Customer #{t_id}: {classification} (friction={friction_score})")
+                last_notified = notification_state.get(t_id)
+                should_notify = (
+                    last_notified is None
+                    or (dwell_time - last_notified) >= NOTIFY_COOLDOWN_SECONDS
+                )
+                if should_notify:
+                    notify_employee(t_id, classification, friction_score, dwell_time)
+                    notification_state[t_id] = dwell_time
+            else:
+                # No longer alerting -> reset, so a FUTURE alert episode
+                # notifies immediately instead of inheriting the old cooldown.
+                notification_state.pop(t_id, None)
         else:
             if t_id in zone_timers:
                 del zone_timers[t_id]
             active_alert_ids.discard(t_id)
+            notification_state.pop(t_id, None)
             if t_id in intent_engine.history:
                 del intent_engine.history[t_id]
 
@@ -158,6 +187,7 @@ def process_detections(frame, detections, zone_timers, intent_engine, active_ale
     for t_id in expired_ids:
         del zone_timers[t_id]
         active_alert_ids.discard(t_id)
+        notification_state.pop(t_id, None)
         if t_id in intent_engine.history:
             del intent_engine.history[t_id]
 
@@ -183,6 +213,7 @@ def run_real_source(video_source, headless=False):
     intent_engine = IntentEngine(buffer_size=100, min_move_px=5.0)
     zone_timers = {}
     active_alert_ids = set()
+    notification_state = {}
 
     print(f"Starting AisleIQ Tracker on source={video_source} ... Press 'q' to quit.")
     while cap.isOpened():
@@ -204,7 +235,8 @@ def run_real_source(video_source, headless=False):
                 x1, y1, x2, y2 = map(int, box)
                 detections.append((int(track_id), x1, y1, x2, y2))
 
-        frame = process_detections(frame, detections, zone_timers, intent_engine, active_alert_ids)
+        frame = process_detections(frame, detections, zone_timers, intent_engine, active_alert_ids,
+                                    notification_state)
 
         if not headless:
             cv2.imshow("AisleIQ - OpenCV Tracking Feed", frame)
@@ -272,6 +304,7 @@ def run_synthetic_source(headless=False):
     intent_engine = IntentEngine(buffer_size=100, min_move_px=5.0)
     zone_timers = {}
     active_alert_ids = set()
+    notification_state = {}
 
     tracks = [(tid, gen(), fps) for tid, gen, fps in SYNTHETIC_SHOPPERS]
     max_len = max(len(pts) for _, pts, _ in tracks)
@@ -294,7 +327,8 @@ def run_synthetic_source(headless=False):
             simulated_dwell = round((frame_idx + 1) / fps, 1)
             detections.append((tid, x1, y1, x2, y2, simulated_dwell))
 
-        frame = process_detections(frame, detections, zone_timers, intent_engine, active_alert_ids)
+        frame = process_detections(frame, detections, zone_timers, intent_engine, active_alert_ids,
+                                    notification_state)
 
         if not headless:
             cv2.imshow("AisleIQ - OpenCV Tracking Feed", frame)
