@@ -29,7 +29,7 @@ import numpy as np
 FRAME_W, FRAME_H = 640, 480
 ZONE_PTS = np.array([[50, 50], [590, 50], [590, 430], [50, 430]], np.int32)
 DWELL_THRESHOLD_SECONDS = 5
-NOTIFY_COOLDOWN_SECONDS = 15  # once a shopper is alerted, don't re-notify for this many
+NOTIFY_COOLDOWN_SECONDS = 30 # once a shopper is alerted, don't re-notify for this many
                               # more seconds of sustained alert (still logs, just quieter)
 
 
