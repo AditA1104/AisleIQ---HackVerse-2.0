@@ -1,49 +1,85 @@
 import os
 import requests
-from langchain_community.chat_models import ChatOllama
-from langchain_core.prompts import ChatPromptTemplate
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dotenv import load_dotenv
+from langchain_community.llms import Ollama
+from langchain_core.prompts import ChatPromptTemplate
 
-# Load the hidden variables from the .env file
-load_dotenv() 
+# Load environment variables from .env
+load_dotenv()
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
-# 1. Fetch the secure webhook URL (ALL CAPS to match the rest of your script)
-SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
-
-# 2. Initialize Local IBM Granite LLM via Ollama (100% Free / Local on Mac) [cite: 710, 715]
+# Initialize Local IBM Granite LLM via Ollama
 try:
-    llm = ChatOllama(model="granite-code:8b", temperature=0.2)
+    llm = Ollama(model="granite-code:8b")
 except Exception as e:
-    print(f"[AisleIQ Backend Warning] Local Ollama model failed to load: {e}")
+    print(f"⚠️ Ollama model initialization warning: {e}")
     llm = None
 
-def send_slack_alert(message: str) -> bool:
-    """Pushes an alert message to the store staff Slack channel."""
-    # Check if URL is empty or still set to default mock string
-    if not SLACK_WEBHOOK_URL or "YOUR/WEBHOOK/URL" in SLACK_WEBHOOK_URL:
-        print(f"[Mock Slack Alert Sent - Webhook URL Missing in .env]: {message}")
-        return True
-    
+# Global alert log for Mridul's Streamlit UI
+RECENT_ALERTS_LOG = []
+MAX_ALERT_LOG_SIZE = 50  # cap so the log doesn't grow unbounded during a long demo
+
+# LLM call tuning
+LLM_TIMEOUT_SECONDS = 8
+LLM_MAX_RETRIES = 2
+
+_llm_executor = ThreadPoolExecutor(max_workers=2)
+
+
+def _invoke_chain_with_timeout(chain, inputs: dict):
+    """
+    Runs chain.invoke() with a timeout so a slow/stuck local Ollama call
+    can't block the whole alert dispatch path. Retries a couple of times
+    before giving up and letting the caller fall back to a template alert.
+    """
+    last_error = None
+    for attempt in range(1, LLM_MAX_RETRIES + 1):
+        future = _llm_executor.submit(chain.invoke, inputs)
+        try:
+            return future.result(timeout=LLM_TIMEOUT_SECONDS)
+        except FutureTimeoutError as e:
+            last_error = e
+            print(f"⏱️ LLM call timed out (attempt {attempt}/{LLM_MAX_RETRIES})")
+        except Exception as e:
+            last_error = e
+            print(f"⚠️ LLM call failed (attempt {attempt}/{LLM_MAX_RETRIES}): {e}")
+    raise last_error if last_error else RuntimeError("LLM call failed with no error captured")
+
+
+def _append_alert(entry: dict) -> None:
+    """Appends an alert to the log and trims it to MAX_ALERT_LOG_SIZE."""
+    RECENT_ALERTS_LOG.append(entry)
+    if len(RECENT_ALERTS_LOG) > MAX_ALERT_LOG_SIZE:
+        del RECENT_ALERTS_LOG[: len(RECENT_ALERTS_LOG) - MAX_ALERT_LOG_SIZE]
+
+
+def send_slack_notification(message: str) -> bool:
+    """Dispatches a text message to the configured Slack Webhook."""
+    if not SLACK_WEBHOOK_URL:
+        print("❌ Error: SLACK_WEBHOOK_URL not found in environment variables.")
+        return False
+
     payload = {"text": message}
     try:
         response = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=5)
-        
         if response.status_code == 200:
-            print(f"✅ [Slack Alert Sent Successfully!]: {message}")
+            print("✅ Slack alert dispatched successfully!")
             return True
         else:
-            print(f"❌ [Slack Error {response.status_code}]: {response.text}")
+            print(f"❌ Slack API returned error {response.status_code}: {response.text}")
             return False
-            
     except Exception as e:
-        print(f"❌ [Slack Connection Failed]: {e}")
+        print(f"❌ Exception sending Slack notification: {e}")
         return False
 
-def trigger_dwell_time_alert(aisle_name: str, dwell_seconds: int) -> str:
+
+def handle_dwell_alert(aisle_name: str, dwell_seconds: int) -> str:
     """
-    Called when Pooja's math module detects dwell_time > 45s.
-    Generates a natural, action-oriented alert via IBM Granite LLM.
+    Triggers LLM 1-sentence urgent notification and posts to Slack + UI feed.
+    (Note: Upstream cooldown logic is handled by Pooja's module).
     """
+    alert_text = ""
     if llm:
         try:
             prompt = ChatPromptTemplate.from_template(
@@ -53,38 +89,50 @@ def trigger_dwell_time_alert(aisle_name: str, dwell_seconds: int) -> str:
                 "recommending immediate assistance."
             )
             chain = prompt | llm
-            result = chain.invoke({"aisle": aisle_name, "dwell_time": dwell_seconds})
-            # THIS IS THE LINE THAT CHANGED 👇
-            alert_text = f"🚨 **AisleIQ Alert**: {str(result.content)}" 
+            result = _invoke_chain_with_timeout(chain, {"aisle": aisle_name, "dwell_time": dwell_seconds})
+
+            # Extract content string safely
+            content_str = str(result.content if hasattr(result, 'content') else result)
+            alert_text = f"🚨 AisleIQ Alert: {content_str.strip()}"
         except Exception as e:
-            alert_text = f"🚨 **AisleIQ Alert**: Customer lingering at {aisle_name} for {dwell_seconds}s. Please assist!"
+            alert_text = f"🚨 AisleIQ Alert: Customer lingering at {aisle_name} for {dwell_seconds}s. Please assist!"
     else:
-        alert_text = f"🚨 **AisleIQ Alert**: Customer lingering at {aisle_name} for {dwell_seconds}s. Please assist!"
-    # Send to Slack
-    send_slack_alert(alert_text)
+        alert_text = f"🚨 AisleIQ Alert: Customer lingering at {aisle_name} for {dwell_seconds}s. Please assist!"
+
+    # Log alert for Mridul's Streamlit UI feed (bounded so it can't grow forever)
+    _append_alert({
+        "aisle": aisle_name,
+        "dwell_seconds": dwell_seconds,
+        "message": alert_text
+    })
+
+    # Dispatch live notification to Slack
+    send_slack_notification(alert_text)
     return alert_text
 
-def summarize_daily_trends(heatmap_json: dict) -> str:
-    """
-    Generates an executive summary for store owners based on daily foot traffic heatmaps.
-    """
-    if not llm:
-        return "Daily traffic concentrated heavily in Electronics and Checkout zones."
-        
-    prompt = ChatPromptTemplate.from_template(
-        "You are a retail analytics expert. Based on this daily foot traffic data: {data}, "
-        "summarize the top 2 actionable insights for the store owner in plain English. "
-        "Highlight high-value red zones and congested areas."
-    )
-    chain = prompt | llm
-    try:
-        response = chain.invoke({"data": heatmap_json})
-        return str(response.content)
-    except Exception as e:
-        return "High traffic in Electronics (Shelf 2B). Recommend premium product placement."
 
-# Test block when running backend.py directly
+def get_live_alerts():
+    """Returns the recent alert log list for Streamlit UI integration."""
+    return RECENT_ALERTS_LOG
+
+
+def summarize_daily_trends(traffic_data: dict) -> str:
+    """Generates a plain-English executive summary of daily store traffic and heatmaps."""
+    if not llm:
+        return "Daily Summary: Store foot traffic operating as normal."
+    try:
+        prompt = ChatPromptTemplate.from_template(
+            "You are AisleIQ's retail analyst. Summarize the following daily traffic and heatmap "
+            "metrics into 2 clear sentences for the store manager: {data}"
+        )
+        chain = prompt | llm
+        result = _invoke_chain_with_timeout(chain, {"data": str(traffic_data)})
+        return str(result.content if hasattr(result, 'content') else result).strip()
+    except Exception as e:
+        return f"Daily Summary: Store processed metrics successfully. (Details: {e})"
+
+
 if __name__ == "__main__":
     print("Testing AisleIQ Backend Engine...")
-    alert = trigger_dwell_time_alert(aisle_name="Electronics", dwell_seconds=52)
-    print("Generated Alert Output:", alert)
+    test_msg = handle_dwell_alert("Electronics", 52)
+    print("Generated Alert:", test_msg)
