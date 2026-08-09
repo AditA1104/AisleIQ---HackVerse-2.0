@@ -26,6 +26,11 @@ LLM_MAX_RETRIES = 2
 
 _llm_executor = ThreadPoolExecutor(max_workers=2)
 
+# Separate pool for confusion-alert dispatch, so Pooja's real-time per-frame
+# video loop never blocks on Slack/LLM latency (fire-and-forget from the caller's
+# point of view — see handle_confusion_alert_async below).
+_alert_executor = ThreadPoolExecutor(max_workers=4)
+
 
 def _invoke_chain_with_timeout(chain, inputs: dict):
     """
@@ -109,6 +114,74 @@ def handle_dwell_alert(aisle_name: str, dwell_seconds: int) -> str:
     # Dispatch live notification to Slack
     send_slack_notification(alert_text)
     return alert_text
+
+
+def handle_confusion_alert(customer_id, classification, friction_score, dwell_seconds,
+                            aisle_name: str = "Monitored Aisle Zone") -> str:
+    """
+    Classification-aware alert path, driven by Pooja's IntentEngine
+    (Active Hesitation / Choice Paralysis / etc). Generates an LLM message,
+    dispatches to Slack, and logs to RECENT_ALERTS_LOG.
+    """
+    alert_text = ""
+    if llm:
+        try:
+            prompt = ChatPromptTemplate.from_template(
+                "You are AisleIQ, an intelligent store assistant. Customer #{customer_id} "
+                "has been in the {aisle} for {dwell_time} seconds and has been classified as "
+                "'{classification}' (friction score {friction_score}). Generate a concise, "
+                "1-sentence urgent notification for a floor employee recommending immediate "
+                "assistance, tailored to this classification."
+            )
+            chain = prompt | llm
+            result = _invoke_chain_with_timeout(chain, {
+                "customer_id": customer_id,
+                "aisle": aisle_name,
+                "dwell_time": round(dwell_seconds, 1),
+                "classification": classification,
+                "friction_score": friction_score,
+            })
+            content_str = str(result.content if hasattr(result, "content") else result)
+            alert_text = f"🚨 AisleIQ Alert: {content_str.strip()}"
+        except Exception:
+            alert_text = (
+                f"🚨 AisleIQ Alert: Customer #{customer_id} showing '{classification}' "
+                f"in {aisle_name} (dwell={dwell_seconds:.1f}s, friction={friction_score}). "
+                f"Please assist!"
+            )
+    else:
+        alert_text = (
+            f"🚨 AisleIQ Alert: Customer #{customer_id} showing '{classification}' "
+            f"in {aisle_name} (dwell={dwell_seconds:.1f}s, friction={friction_score}). "
+            f"Please assist!"
+        )
+
+    # Log alert for Mridul's Streamlit UI feed. NOTE: different key shape
+    # than handle_dwell_alert's entries (no "aisle" key here) — dashboard
+    # code needs to handle both shapes if it reads specific keys.
+    _append_alert({
+        "customer_id": customer_id,
+        "classification": classification,
+        "friction_score": friction_score,
+        "dwell_seconds": dwell_seconds,
+        "message": alert_text,
+    })
+
+    send_slack_notification(alert_text)
+    return alert_text
+
+
+def handle_confusion_alert_async(customer_id, classification, friction_score, dwell_seconds,
+                                  aisle_name: str = "Monitored Aisle Zone"):
+    """
+    Fire-and-forget wrapper around handle_confusion_alert. Submits to a
+    background thread pool so the caller (Pooja's real-time per-frame loop)
+    never blocks on Slack/LLM latency.
+    """
+    return _alert_executor.submit(
+        handle_confusion_alert,
+        customer_id, classification, friction_score, dwell_seconds, aisle_name,
+    )
 
 
 def get_live_alerts():

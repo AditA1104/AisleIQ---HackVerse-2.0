@@ -1,0 +1,11 @@
+python-dotenv
+langchain-community
+langchain-core
+requests
+opencv-python
+numpy
+ultralytics
+streamlit
+streamlit-autorefresh
+pandas
+plotly
