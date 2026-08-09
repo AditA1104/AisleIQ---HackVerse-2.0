@@ -68,10 +68,10 @@ A Streamlit dashboard providing real-time video analytics, active customer track
               +----------------+----------------+
               |                                 |
               v                                 v
-+------------------------------+  +------------------------------+
-|   Instant Slack Alerts       |  |   Streamlit Manager UI       |
-|   (Floor Staff Mobile)       |  |   (Analytics & Live Heatmap) |
-+------------------------------+  +------------------------------+
+    +------------------------------+  +------------------------------+
+    |   Instant Slack Alerts       |  |   Streamlit Manager UI       |
+    |   (Floor Staff Mobile)       |  |   (Analytics & Live Heatmap) |
+    +------------------------------+  +------------------------------+
 
 ---
 
