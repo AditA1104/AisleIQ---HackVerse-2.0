@@ -3,19 +3,24 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 # --- BACKEND AI IMPORTS ---
 try:
-    from backend import trigger_dwell_time_alert, summarize_daily_trends
+    from backend import load_recent_alerts_from_disk, summarize_daily_trends
 except ImportError:
-    def trigger_dwell_time_alert(aisle_name="Electronics", dwell_seconds=48):
-        return f"🚨 Alert: Customer stalled in {aisle_name} for {dwell_seconds} seconds! Floor assistance recommended."
+    def load_recent_alerts_from_disk():
+        return []
 
-    def summarize_daily_trends(heatmap_data):
+    def summarize_daily_trends(traffic_data):
         return (
-            f"📊 AI Daily Summary: High shopper dwell observed in {heatmap_data.get('Electronics_Zone', 'N/A')}. "
-            f"Queue velocity peaked at {heatmap_data.get('Checkout_Queue', 'N/A')}. Recommended staffing adjustments applied."
+            f"📊 AI Daily Summary: High shopper dwell observed in {traffic_data.get('Electronics_Zone', 'N/A')}. "
+            f"Queue velocity peaked at {traffic_data.get('Checkout_Queue', 'N/A')}. Recommended staffing adjustments applied."
         )
+
+# Poll every 2s for new alerts written by aisletracker.py (a separate
+# process) to alerts_log.json.
+st_autorefresh(interval=2000, key="alerts_autorefresh")
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -40,6 +45,11 @@ if "dark_mode" not in st.session_state:
 
 if "show_ai_summary" not in st.session_state:
     st.session_state.show_ai_summary = False
+
+# Tracks which alerts (by timestamp) we've already st.toast()'d, so the
+# 2s autorefresh doesn't re-fire the same Slack-style toast on every rerun.
+if "toasted_alert_timestamps" not in st.session_state:
+    st.session_state.toasted_alert_timestamps = set()
 
 # --- 3. DYNAMIC SIDEBAR VISIBILITY & ANIMATION CONTROL ---
 st.markdown(
@@ -601,14 +611,43 @@ else:
 # ==========================================
 if st.session_state.active_tab == "Overview":
 
-    customer_is_confused = True
+    # --- LIVE CONFUSION ALERTS FROM THE TRACKER ---
+    # aisletracker.py runs as a separate process and mirrors alerts to
+    # alerts_log.json; we poll that file (via the 2s st_autorefresh above)
+    # rather than calling backend directly, since backend's in-memory log
+    # only reflects THIS process, not the tracker's.
+    live_alerts = load_recent_alerts_from_disk()
 
-    if customer_is_confused:
-        alert_text = trigger_dwell_time_alert(
-            aisle_name="Electronics", dwell_seconds=48
-        )
-        st.warning(alert_text)
-        st.toast(alert_text, icon="🚨")
+    if live_alerts:
+        new_alerts = [
+            a for a in live_alerts
+            if a.get("timestamp") not in st.session_state.toasted_alert_timestamps
+        ]
+        for alert in new_alerts:
+            st.toast(alert.get("message", "New alert"), icon="🚨")
+            st.session_state.toasted_alert_timestamps.add(alert.get("timestamp"))
+
+        # Persistent banner too, since toasts auto-dismiss and are easy to miss.
+        st.warning(live_alerts[-1].get("message", "New alert"))
+    else:
+        st.info("✅ No active confusion alerts — all clear on the floor.")
+
+    with st.expander(f"🔔 Recent Alerts ({len(live_alerts)})", expanded=bool(live_alerts)):
+        if not live_alerts:
+            st.caption("Alerts from aisletracker.py will appear here once a customer is flagged.")
+        else:
+            for alert in reversed(live_alerts[-10:]):
+                ts = alert.get("timestamp")
+                time_str = time.strftime("%H:%M:%S", time.localtime(ts)) if ts else "—"
+                classification = alert.get("classification", "Dwell Alert")
+                st.markdown(
+                    f"""<div style="border-left: 4px solid #e01e5a; background: #2b2d31;
+                    padding: 10px 14px; border-radius: 6px; margin-bottom: 8px;">
+                    <div style="color: #999; font-size: 12px;">{time_str} · {classification}</div>
+                    <div style="color: #fff; font-size: 14px;">🚨 {alert.get('message', '')}</div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
 
     st.markdown("### 🗂️ SELECT APP MODULE")
     n1, n2 = st.columns(2)

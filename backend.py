@@ -1,4 +1,6 @@
+import json
 import os
+import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dotenv import load_dotenv
@@ -19,6 +21,12 @@ except Exception as e:
 # Global alert log for Mridul's Streamlit UI
 RECENT_ALERTS_LOG = []
 MAX_ALERT_LOG_SIZE = 50  # cap so the log doesn't grow unbounded during a long demo
+
+# aisletracker.py (tracker) and appm.py (dashboard) run as SEPARATE processes,
+# so they don't share RECENT_ALERTS_LOG in memory. We mirror it to disk here,
+# same pattern as aisletracker.py's live_metrics.json, so the dashboard can
+# poll this file and pick up alerts fired by the tracker process.
+ALERTS_LOG_PATH = "alerts_log.json"
 
 # LLM call tuning
 LLM_TIMEOUT_SECONDS = 8
@@ -53,10 +61,18 @@ def _invoke_chain_with_timeout(chain, inputs: dict):
 
 
 def _append_alert(entry: dict) -> None:
-    """Appends an alert to the log and trims it to MAX_ALERT_LOG_SIZE."""
+    """Appends an alert to the in-memory log, trims it to MAX_ALERT_LOG_SIZE,
+    and mirrors it to disk (ALERTS_LOG_PATH) so a separate process — like the
+    Streamlit dashboard — can pick it up by polling the file."""
+    entry = {**entry, "timestamp": time.time()}
     RECENT_ALERTS_LOG.append(entry)
     if len(RECENT_ALERTS_LOG) > MAX_ALERT_LOG_SIZE:
         del RECENT_ALERTS_LOG[: len(RECENT_ALERTS_LOG) - MAX_ALERT_LOG_SIZE]
+    try:
+        with open(ALERTS_LOG_PATH, "w") as f:
+            json.dump(RECENT_ALERTS_LOG, f)
+    except Exception as e:
+        print(f"⚠️ Failed to write {ALERTS_LOG_PATH}: {e}")
 
 
 def send_slack_notification(message: str) -> bool:
@@ -185,8 +201,24 @@ def handle_confusion_alert_async(customer_id, classification, friction_score, dw
 
 
 def get_live_alerts():
-    """Returns the recent alert log list for Streamlit UI integration."""
+    """Returns the recent alert log list for same-process callers/testing."""
     return RECENT_ALERTS_LOG
+
+
+def load_recent_alerts_from_disk():
+    """
+    Reads the mirrored alert log from ALERTS_LOG_PATH. This is what the
+    Streamlit dashboard should call — it runs in a separate process from
+    aisletracker.py, so it can't see RECENT_ALERTS_LOG in memory and needs
+    to read what the tracker process wrote to disk instead.
+    Returns [] if the file doesn't exist yet or is malformed (e.g. read
+    mid-write) rather than raising, so the dashboard doesn't crash on poll.
+    """
+    try:
+        with open(ALERTS_LOG_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
 
 
 def summarize_daily_trends(traffic_data: dict) -> str:
