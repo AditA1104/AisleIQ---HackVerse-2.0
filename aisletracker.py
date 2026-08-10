@@ -16,12 +16,18 @@ Usage:
     python aisleiq_tracker.py --source supermarket.mp4   # video file
     python aisleiq_tracker.py --source synthetic         # scripted shoppers
     python aisleiq_tracker.py --source synthetic --headless   # no GUI window
+    python aisleiq_tracker.py --source testvid1.mp4 --fps 24  # override
+                                                                # playback pacing
+                                                                # if auto-detected
+                                                                # FPS looks wrong
 """
 
 import argparse
 import json
+import math
 import time
 from collections import deque
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -33,6 +39,69 @@ ZONE_PTS = np.array([[50, 50], [590, 50], [590, 430], [50, 430]], np.int32)
 DWELL_THRESHOLD_SECONDS = 5
 NOTIFY_COOLDOWN_SECONDS = 30 # once a shopper is alerted, don't re-notify for this many
                               # more seconds of sustained alert (still logs, just quieter)
+
+# --- Traffic heatmap grid ---
+# 16x12 divides evenly into the 640x480 frame (40px cells), giving a decent
+# balance of spatial resolution vs a chart that isn't just noise.
+HEATMAP_GRID_COLS = 16
+HEATMAP_GRID_ROWS = 12
+HEATMAP_DATA_PATH = "heatmap_data.json"
+HEATMAP_WRITE_INTERVAL_SECONDS = 1.0  # throttle disk writes -- don't hit disk every frame
+
+# --- Live feed mirror (for the Streamlit dashboard's "Live Tracking" tab) ---
+# Not a real video stream -- no websockets/WebRTC. We mirror the current
+# annotated frame to disk, same pattern as alerts_log.json / heatmap_data.json
+# / live_metrics.json, and the dashboard (a separate process) polls + displays
+# it. At ~10 writes/sec + a fast dashboard poll, it reads as "live" without
+# needing any streaming infrastructure.
+LIVE_FRAME_PATH = "live_frame.jpg"
+LIVE_FRAME_WRITE_INTERVAL_SECONDS = 0.1  # ~10fps to the dashboard -- smooth
+                                          # enough to look live, throttled so
+                                          # we're not JPEG-encoding + hitting
+                                          # disk on every single inference frame
+
+# --- Playback pacing sanity bounds ---
+# Some OpenCV backends/containers (notably macOS's AVFoundation backend on
+# certain mp4s) misreport cv2.CAP_PROP_FPS -- e.g. returning a raw container
+# timebase value like 90000 instead of the actual frame rate. If trusted
+# blindly, that collapses target_frame_time to ~0 and the video plays back
+# as fast as the CPU can decode+infer instead of at its real speed. We clamp
+# to this range and fall back to a sane default outside it.
+MIN_PLAUSIBLE_FPS = 1.0
+MAX_PLAUSIBLE_FPS = 120.0
+DEFAULT_FPS_FALLBACK = 30.0
+
+
+def _save_heatmap_data(grid: np.ndarray) -> None:
+    """Mirrors the footfall grid to disk (same pattern as live_metrics.json /
+    alerts_log.json) so the Streamlit dashboard -- a separate process -- can
+    read it. Values are frame-counts per cell: someone standing still keeps
+    incrementing the same cell every frame, so this is naturally dwell-weighted,
+    not just a raw crossing count."""
+    try:
+        with open(HEATMAP_DATA_PATH, "w") as f:
+            json.dump({
+                "grid": grid.tolist(),
+                "rows": HEATMAP_GRID_ROWS,
+                "cols": HEATMAP_GRID_COLS,
+                "frame_w": FRAME_W,
+                "frame_h": FRAME_H,
+                "last_updated": time.time(),
+            }, f)
+    except Exception as e:
+        print(f"⚠️ Failed to write {HEATMAP_DATA_PATH}: {e}")
+
+
+def _save_live_frame(frame: np.ndarray) -> None:
+    """Mirrors the current annotated frame (zone outline, bounding boxes,
+    classification labels -- whatever's already drawn on it) to disk so the
+    Streamlit dashboard can display it as a pseudo-live feed by polling and
+    re-reading this file. Works identically for webcam, mp4, or synthetic
+    mode, since it's called after frame annotation regardless of source."""
+    try:
+        cv2.imwrite(LIVE_FRAME_PATH, frame)
+    except Exception as e:
+        print(f"⚠️ Failed to write {LIVE_FRAME_PATH}: {e}")
 
 
 # ----------------------------------------------------------------------
@@ -109,7 +178,7 @@ def notify_employee(t_id, classification, friction_score, dwell_time):
 
 
 def process_detections(frame, detections, zone_timers, intent_engine, active_alert_ids,
-                        notification_state):
+                        notification_state, heatmap_state):
     """
     detections: list of tuples, either
         (t_id, x1, y1, x2, y2)                  -- dwell_time computed from wall clock
@@ -119,6 +188,9 @@ def process_detections(frame, detections, zone_timers, intent_engine, active_ale
                                                      not real elapsed time)
     notification_state: dict of t_id -> dwell_time at which they were last notified.
                          Lives in the caller so it persists across frames.
+    heatmap_state: dict {"grid": np.ndarray, "last_write": float} -- lives in the
+                    caller so the footfall grid accumulates across frames and the
+                    disk write can be throttled independently of the frame rate.
     """
     cv2.polylines(frame, [ZONE_PTS], isClosed=True, color=(0, 255, 255), thickness=2)
     cv2.putText(frame, "Monitored Aisle Zone", (105, 90),
@@ -138,6 +210,13 @@ def process_detections(frame, detections, zone_timers, intent_engine, active_ale
         center_x = int((x1 + x2) / 2)
         center_y = int((y1 + y2) / 2)
         centroid = (float(center_x), float(center_y))
+
+        # Accumulate footfall for the traffic heatmap -- every detected person,
+        # every frame, regardless of whether they're inside the alert zone.
+        # This is what makes it dwell-weighted rather than a raw crossing count.
+        hm_col = min(max(int(center_x / FRAME_W * HEATMAP_GRID_COLS), 0), HEATMAP_GRID_COLS - 1)
+        hm_row = min(max(int(center_y / FRAME_H * HEATMAP_GRID_ROWS), 0), HEATMAP_GRID_ROWS - 1)
+        heatmap_state["grid"][hm_row, hm_col] += 1
 
         is_inside = cv2.pointPolygonTest(ZONE_PTS, (center_x, center_y), False) >= 0
 
@@ -206,13 +285,45 @@ def process_detections(frame, detections, zone_timers, intent_engine, active_ale
     with open("live_metrics.json", "w") as f:
         json.dump(dashboard_data, f)
 
+    if current_time - heatmap_state["last_write"] >= HEATMAP_WRITE_INTERVAL_SECONDS:
+        _save_heatmap_data(heatmap_state["grid"])
+        heatmap_state["last_write"] = current_time
+
     return frame
+
+
+def _resolve_playback_fps(cap: cv2.VideoCapture, fps_override: Optional[float]) -> float:
+    """
+    Figures out what FPS to pace file playback at. An explicit --fps
+    always wins. Otherwise, trusts cv2.CAP_PROP_FPS only if it falls in a
+    plausible range -- some backends/containers report bogus values (e.g.
+    a raw timebase like 90000 instead of the real frame rate), which would
+    otherwise collapse target_frame_time to ~0 and make the video play
+    back as fast as the CPU can decode+infer instead of its real speed.
+    """
+    if fps_override:
+        return fps_override
+
+    reported_fps = cap.get(cv2.CAP_PROP_FPS)
+    if (
+        not reported_fps
+        or math.isnan(reported_fps)
+        or not (MIN_PLAUSIBLE_FPS <= reported_fps <= MAX_PLAUSIBLE_FPS)
+    ):
+        print(
+            f"⚠️ Ignoring implausible reported FPS ({reported_fps}); "
+            f"falling back to {DEFAULT_FPS_FALLBACK}. If playback still "
+            f"looks off, pass --fps <value> with your video's real frame rate."
+        )
+        return DEFAULT_FPS_FALLBACK
+
+    return reported_fps
 
 
 # ----------------------------------------------------------------------
 # Source 1: real video / webcam via YOLOv8
 # ----------------------------------------------------------------------
-def run_real_source(video_source, headless=False):
+def run_real_source(video_source, headless=False, fps_override: Optional[float] = None):
     from ultralytics import YOLO  # pyright: ignore[reportPrivateImportUsage]  # lazy import: not needed for synthetic mode
 
     model = YOLO("yolov8n.pt")
@@ -224,17 +335,17 @@ def run_real_source(video_source, headless=False):
     # this, cap.read() + inference runs as fast as the CPU/GPU allows,
     # which is why mp4 playback can look sped up on faster machines.
     is_file_source = isinstance(video_source, str)
-    source_fps = cap.get(cv2.CAP_PROP_FPS)
-    if not source_fps or source_fps <= 1:
-        source_fps = 30.0  # fallback if the container doesn't report FPS
+    source_fps = _resolve_playback_fps(cap, fps_override)
     target_frame_time = 1.0 / source_fps
 
     intent_engine = IntentEngine(buffer_size=100, min_move_px=5.0)
     zone_timers = {}
     active_alert_ids = set()
     notification_state = {}
+    heatmap_state = {"grid": np.zeros((HEATMAP_GRID_ROWS, HEATMAP_GRID_COLS), dtype=np.float64), "last_write": 0.0}
+    last_live_frame_write = 0.0
 
-    print(f"Starting AisleIQ Tracker on source={video_source} ... Press 'q' to quit.")
+    print(f"Starting AisleIQ Tracker on source={video_source} (pacing at {source_fps:.1f} fps) ... Press 'q' to quit.")
     while cap.isOpened():
         loop_start = time.time()
 
@@ -258,7 +369,12 @@ def run_real_source(video_source, headless=False):
                 detections.append((int(track_id), x1, y1, x2, y2))
 
         frame = process_detections(frame, detections, zone_timers, intent_engine, active_alert_ids,
-                                    notification_state)
+                                    notification_state, heatmap_state)
+
+        now = time.time()
+        if now - last_live_frame_write >= LIVE_FRAME_WRITE_INTERVAL_SECONDS:
+            _save_live_frame(frame)
+            last_live_frame_write = now
 
         remaining = target_frame_time - (time.time() - loop_start) if is_file_source else 0
 
@@ -273,6 +389,9 @@ def run_real_source(video_source, headless=False):
     cap.release()
     if not headless:
         cv2.destroyAllWindows()
+    # Final write regardless of the throttle interval, so the dashboard sees
+    # the complete accumulated grid once tracking stops, not a stale snapshot.
+    _save_heatmap_data(heatmap_state["grid"])
 
 
 # ----------------------------------------------------------------------
@@ -332,6 +451,8 @@ def run_synthetic_source(headless=False):
     zone_timers = {}
     active_alert_ids = set()
     notification_state = {}
+    heatmap_state = {"grid": np.zeros((HEATMAP_GRID_ROWS, HEATMAP_GRID_COLS), dtype=np.float64), "last_write": 0.0}
+    last_live_frame_write = 0.0
 
     tracks = [(tid, gen(), fps) for tid, gen, fps in SYNTHETIC_SHOPPERS]
     max_len = max(len(pts) for _, pts, _ in tracks)
@@ -355,7 +476,12 @@ def run_synthetic_source(headless=False):
             detections.append((tid, x1, y1, x2, y2, simulated_dwell))
 
         frame = process_detections(frame, detections, zone_timers, intent_engine, active_alert_ids,
-                                    notification_state)
+                                    notification_state, heatmap_state)
+
+        now = time.time()
+        if now - last_live_frame_write >= LIVE_FRAME_WRITE_INTERVAL_SECONDS:
+            _save_live_frame(frame)
+            last_live_frame_write = now
 
         if not headless:
             cv2.imshow("AisleIQ - OpenCV Tracking Feed", frame)
@@ -366,6 +492,10 @@ def run_synthetic_source(headless=False):
     if not headless:
         cv2.destroyAllWindows()
     print("Synthetic run complete.")
+    # Final write regardless of the throttle interval -- in headless mode
+    # especially, the loop can finish inside the same 1s window and never
+    # otherwise trigger a write.
+    _save_heatmap_data(heatmap_state["grid"])
 
 
 # ----------------------------------------------------------------------
@@ -379,6 +509,13 @@ def main():
         "--headless", action="store_true",
         help="Skip cv2.imshow/waitKey — useful for servers/CI without a display."
     )
+    parser.add_argument(
+        "--fps", type=float, default=None,
+        help="Override video playback pacing (frames per second). Use this "
+             "if a video file plays back too fast or too slow -- some "
+             "containers/backends report an incorrect FPS value that "
+             "can't be reliably auto-detected."
+    )
     args = parser.parse_args()
 
     if args.source.lower() == "synthetic":
@@ -386,7 +523,7 @@ def main():
     else:
         # numeric string -> webcam index; otherwise treat as a file path
         source = int(args.source) if args.source.isdigit() else args.source
-        run_real_source(source, headless=args.headless)
+        run_real_source(source, headless=args.headless, fps_override=args.fps)
 
 
 if __name__ == "__main__":

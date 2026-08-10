@@ -1,7 +1,10 @@
+import json
+import os
 import time
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 # --- BACKEND AI IMPORTS ---
@@ -21,6 +24,35 @@ except ImportError:
 
     def load_recent_alerts_from_disk():
         return []
+
+
+# aisletracker.py (a separate process) mirrors its footfall grid to
+# heatmap_data.json, same disk-mirroring pattern as alerts_log.json /
+# live_metrics.json. This is self-contained (no backend.py dependency)
+# since the heatmap has nothing to do with the GenAI/Slack pipeline.
+HEATMAP_DATA_PATH = "heatmap_data.json"
+
+
+def load_heatmap_data():
+    """Returns the heatmap payload dict, or None if aisletracker.py hasn't
+    written one yet (file missing) or it's mid-write (malformed JSON)."""
+    try:
+        with open(HEATMAP_DATA_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+# aisletracker.py also mirrors its current annotated frame to disk (NOT a
+# real video stream -- no websockets/WebRTC -- just a rapidly refreshed
+# still image, same disk-mirroring pattern as everything else). We poll
+# and display it in the Live Tracking tab.
+LIVE_FRAME_PATH = "live_frame.jpg"
+# If the file hasn't been updated more recently than this, treat the feed
+# as offline rather than displaying a frozen last-seen frame as if it were
+# live -- aisletracker.py writes at ~10fps (every 0.1s), so anything more
+# than a few seconds stale means the tracker isn't running anymore.
+LIVE_FRAME_STALE_SECONDS = 5
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -68,6 +100,9 @@ if "dark_mode" not in st.session_state:
 
 if "show_ai_summary" not in st.session_state:
     st.session_state.show_ai_summary = False
+
+if "ai_summary_text" not in st.session_state:
+    st.session_state.ai_summary_text = ""
 
 # Timestamp-based dedup for toast pop-ups (NOT index/count-based). Alerts
 # come from a JSON file that backend.py trims to the last 50 entries, so
@@ -832,6 +867,116 @@ def render_notifications_page():
             unsafe_allow_html=True,
         )
 
+
+@st.fragment(run_every=3)
+def render_traffic_heatmap():
+    """Renders the real footfall heatmap from aisletracker.py's accumulated
+    grid (heatmap_data.json), or a labeled sample pattern if no tracking
+    session has run yet -- so the chart never looks broken/empty before
+    a demo starts."""
+    payload = load_heatmap_data()
+
+    if payload is None or not any(cell > 0 for row in payload["grid"] for cell in row):
+        st.info(
+            "No tracking session running yet — showing a sample pattern. "
+            "Run `python aisletracker.py --source synthetic` (or a real video/webcam) "
+            "to populate this with live footfall data."
+        )
+        np.random.seed(12)
+        grid_data = np.random.exponential(scale=12, size=(10, 14))
+        grid_data[3:6, 5:9] += 50
+    else:
+        grid_data = np.array(payload["grid"])
+        last_updated = payload.get("last_updated")
+        age_s = int(time.time() - last_updated) if last_updated else None
+        age_str = f"{age_s}s ago" if age_s is not None else "just now"
+        st.caption(f"🟢 Live footfall data from aisletracker.py · last updated {age_str}")
+
+    fig_map = px.imshow(
+        grid_data,
+        color_continuous_scale=[
+            "#1E3A8A",  # deep blue -- low footfall / ignored zones
+            "#3B82F6",  # blue
+            "#FDE047",  # yellow -- transition
+            "#F97316",  # orange
+            "#DC2626",  # red -- high footfall / hot zones
+        ],
+    )
+
+    # Smooth continuous gradient between cells (bilinear interpolation)
+    # instead of visible blocky cell borders.
+    fig_map.update_traces(
+        zsmooth="best",
+        hovertemplate="Footfall: %{z}<extra></extra>",
+    )
+
+    # Raw frame-count numbers aren't meaningful to a store manager -- show
+    # a Low/High gradient legend instead of a numeric axis/colorbar scale.
+    vmin, vmax = float(grid_data.min()), float(grid_data.max())
+    if vmax > vmin:
+        colorbar_config = go.layout.coloraxis.ColorBar(
+            title="Footfall", thickness=18, len=0.6,
+            tickvals=[vmin, vmax], ticktext=["Low", "High"],
+        )
+    else:
+        colorbar_config = go.layout.coloraxis.ColorBar(
+            title="Footfall", thickness=18, len=0.6, showticklabels=False,
+        )
+
+    fig_map.update_xaxes(visible=False)
+    fig_map.update_yaxes(visible=False)
+    fig_map.update_layout(
+        height=600,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=main_text, family="Poppins", size=16),
+        margin=dict(l=20, r=20, t=20, b=20),
+        coloraxis_colorbar=colorbar_config,
+    )
+    st.plotly_chart(fig_map, use_container_width=True)
+
+
+@st.fragment(run_every=0.5)
+def render_live_video_feed():
+    """Polls live_frame.jpg -- the current annotated frame aisletracker.py
+    (a separate process) mirrors to disk every ~0.1s. Not a real video
+    stream (no websockets/WebRTC), just a rapidly refreshed still image,
+    but at a 0.5s dashboard poll it reads as 'live' without needing any
+    streaming infrastructure. Works identically for webcam, mp4, or
+    synthetic mode, since aisletracker.py writes it after frame annotation
+    regardless of source."""
+    is_fresh = False
+    if os.path.exists(LIVE_FRAME_PATH):
+        age_s = time.time() - os.path.getmtime(LIVE_FRAME_PATH)
+        is_fresh = age_s <= LIVE_FRAME_STALE_SECONDS
+
+    if not is_fresh:
+        st.markdown(
+            f"""
+            <div style="background: {btn_bg}; border: 3px dashed {border_col}; border-radius: 20px; height: 480px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #FFFFFF; text-align: center; padding: 20px; box-shadow: 6px 6px 0px {box_shadow_col};">
+                <div style="font-size: 1.8rem; font-weight: 600;">No Live Feed</div>
+                <div style="font-size: 1.15rem; color: #A8D0E6; margin-top: 8px;">Start the tracker to see it here — e.g. <code>python aisletracker.py --source 0</code> for a webcam, or point --source at a video file.</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:10px;'>"
+        "<span class='blinking-dot'>●</span>"
+        "<span style='font-weight:600;'>LIVE — aisletracker.py is running</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    try:
+        st.image(LIVE_FRAME_PATH, use_container_width=True)
+    except Exception:
+        # Rare race: the file was mid-write (cv2.imwrite isn't atomic) when
+        # we tried to read it. Next 0.5s poll will pick up a clean frame --
+        # no need to alarm the user over a single skipped refresh.
+        st.info("Feed frame briefly unavailable — retrying...")
+
 # ==========================================
 # ANIMATED SPLASH SCREEN
 # ==========================================
@@ -1038,15 +1183,20 @@ if st.session_state.active_tab == "Overview":
 
     if not st.session_state.show_ai_summary:
         if st.button("Generate Daily AI Summary", key="ai_summary_trigger_btn"):
+            mock_heatmap_data = {
+                "Electronics_Zone": "52 mins total dwell",
+                "Checkout_Queue": "Peak 6 people at 2 PM",
+            }
+            # Call the LLM exactly once, right here on the click -- NOT on every
+            # rerun. The old version called summarize_daily_trends() every time
+            # this branch rendered, so any click/interaction while the panel was
+            # open re-triggered a fresh (up to ~16s worst-case) LLM call.
+            with st.spinner("Generating AI summary..."):
+                st.session_state.ai_summary_text = summarize_daily_trends(mock_heatmap_data)
             st.session_state.show_ai_summary = True
             st.rerun()
     else:
-        mock_heatmap_data = {
-            "Electronics_Zone": "52 mins total dwell",
-            "Checkout_Queue": "Peak 6 people at 2 PM",
-        }
-        summary = summarize_daily_trends(mock_heatmap_data)
-        st.info(summary)
+        st.info(st.session_state.ai_summary_text)
 
         if st.button("Hide Daily AI Summary", key="hide_ai_summary_btn"):
             st.session_state.show_ai_summary = False
@@ -1069,6 +1219,10 @@ elif st.session_state.active_tab == "Heatmap":
             "Aisle 3 - Personal Care",
         ],
     )
+    # NOTE: aisletracker.py currently monitors a single combined camera
+    # view, not separate named aisles/cameras -- this selector is a UI
+    # placeholder for when multi-camera support exists. It doesn't yet
+    # filter which data is shown below.
 
     st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
 
@@ -1082,29 +1236,7 @@ elif st.session_state.active_tab == "Heatmap":
         unsafe_allow_html=True,
     )
 
-    np.random.seed(12)
-    grid_data = np.random.exponential(scale=12, size=(10, 14))
-    grid_data[3:6, 5:9] += 50
-
-    fig_map = px.imshow(
-        grid_data,
-        labels=dict(x="Aisle Width", y="Shelf Depth", color="Dwell (s)"),
-        color_continuous_scale=[
-            "#D4F4F7",
-            "#A2E2E8",
-            "#229DB0",
-            "#007A93",
-            "#030B33",
-        ],
-    )
-    fig_map.update_layout(
-        height=600,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=main_text, family="Poppins", size=16),
-        margin=dict(l=20, r=20, t=20, b=20),
-    )
-    st.plotly_chart(fig_map, use_container_width=True)
+    render_traffic_heatmap()
 
 # ==========================================
 # TAB 3: STAFF DISPATCH
@@ -1130,15 +1262,7 @@ elif st.session_state.active_tab == "Live Tracking":
 
     st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
 
-    st.markdown(
-        f"""
-        <div style="background: {btn_bg}; border: 3px dashed {border_col}; border-radius: 20px; height: 480px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #FFFFFF; text-align: center; padding: 20px; box-shadow: 6px 6px 0px {box_shadow_col};">
-            <div style="font-size: 1.8rem; font-weight: 600;">Video Stream Placeholder</div>
-            <div style="font-size: 1.15rem; color: #A8D0E6; margin-top: 8px;">Insert your teammate's CCTV video tracking code here later.</div>
-        </div>
-    """,
-        unsafe_allow_html=True,
-    )
+    render_live_video_feed()
 
 # ==========================================
 # TAB 5: NOTIFICATIONS
