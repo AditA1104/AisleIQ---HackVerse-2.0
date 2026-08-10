@@ -72,21 +72,6 @@ A Streamlit dashboard providing real-time video analytics, active customer track
     |   Instant Slack Alerts       |  |   Streamlit Manager UI       |
     |   (Floor Staff Mobile)       |  |   (Analytics & Live Heatmap) |
     +------------------------------+  +------------------------------+
-
----
-
-## 📂 Repository Structure
-
-AisleIQ---HackVerse-2.0/
-│
-├── app.py                   # Streamlit Dashboard UI
-├── backend.py               # GenAI Alert Engine & Slack Dispatcher
-├── test_intent_logic.py     # Dual-Vector Intent Engine & Scenario Tests
-├── requirements.txt         # Project Dependencies
-├── .env.example             # Environment Variable Template
-├── .gitignore               # Ignored Credentials & Temporary Files
-└── README.md                # Project Documentation
-
 ---
 👥 Team & Contributions:
 
