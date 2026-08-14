@@ -10,6 +10,12 @@ The Invisible Shop Assistant
 
 ---
 
+**Live Demo:** [https://aisleiq.streamlit.app](https://aisleiq-dashboard.streamlit.app)
+
+[cite_start]AisleIQ transforms standard, legacy CCTV video streams into actionable, e-commerce-style retail analytics for physical store owners without requiring any hardware upgrades. [cite_start]By combining real-time computer vision tracking with Generative AI, AisleIQ identifies customer dwell behavior, generates automated staff alerts, and delivers actionable spatial heatmaps to optimize store revenue.
+
+---
+
 ## 📌 Problem Statement
 
 E-commerce giants like Amazon track every click, hover time, and abandoned cart in real time. Physical store owners, on the other hand, operate **completely blind**. They record thousands of hours of CCTV footage daily, but only use it retroactively after theft occurs. 
