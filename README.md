@@ -4,9 +4,10 @@ The Invisible Shop Assistant
 > **Bringing E-Commerce Level Analytics to Physical Brick-and-Mortar Retail Using Existing CCTV Infrastructure.**
 
 [![Track: AI for Business Transformation](https://img.shields.io/badge/Hackathon_Track-AI_for_Business_Transformation-blue.svg)](#)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-brightgreen.svg)](https://www.python.org/)
-[![UI: Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b.svg)](https://streamlit.io/)
 [![Framework: LangChain](https://img.shields.io/badge/GenAI-LangChain-121011.svg)](https://www.langchain.com/)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://aisleiq-dashboard.streamlit.app)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
